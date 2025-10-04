@@ -77,6 +77,10 @@
   </div>
 
   <div id="ui">
+    <div class="nasa-badge">
+      <div class="nasa-logo">NASA</div>
+      <div class="nasa-sub">Impact Lab</div>
+    </div>
     <label>Simulation Speed:</label>
     <div class="speed-control">
       <input type="range" id="simSpeed" min="0.01" max="10" step="0.01" value="1">
@@ -107,6 +111,10 @@
       <div>Total Impacts: <span id="impactCount">0</span></div>
       <div>Last Impact Energy: <span id="impactEnergy">-</span></div>
       <div>Simulation Time: <span id="simTime">0.0s</span></div>
+    </div>
+    <div class="tool-row">
+      <button id="screenshot">Take Screenshot</button>
+      <button id="exportLog">Export Log CSV</button>
     </div>
     <hr>
 

@@ -30,6 +30,8 @@ class App {
     this.gravityVisualizers = [];
     this.explosionEffects = [];
     this.trajectoryLines = [];
+  this.surfaceShockwaves = [];
+  this.surfaceWaves = [];
     this.simulationStartTime = Date.now();
     this.lastUpdateTime = Date.now();
     
@@ -40,6 +42,8 @@ class App {
     this.frameCount = 0;
     this.lastFpsTime = Date.now();
     this.currentFps = 60;
+  // simple event log for exporting
+  this.eventLog = [];
 
     // physics
     this.G = 6.67430e-11;
@@ -318,6 +322,8 @@ class App {
     const gravityBtn = el('toggleGravityViz'); if(gravityBtn) gravityBtn.onclick = (e)=>{ this.showGravityViz = !this.showGravityViz; e.target.innerText = this.showGravityViz? 'Hide Gravity Fields' : 'Show Gravity Fields'; this.toggleGravityVisualizers(); };
     const explosionBtn = el('toggleExplosions'); if(explosionBtn) explosionBtn.onclick = (e)=>{ this.enableExplosions = !this.enableExplosions; e.target.innerText = this.enableExplosions? 'Disable Explosions' : 'Enable Explosions'; };
     if (el('spawnAsteroid')) el('spawnAsteroid').onclick = () => this.spawnSelectedAsteroid();
+  if (el('screenshot')) el('screenshot').onclick = () => this.takeScreenshot();
+  if (el('exportLog')) el('exportLog').onclick = () => this.exportLogCSV();
     
     // Camera focus buttons
     if (el('focusSun')) el('focusSun').onclick = () => this.focusOnPlanet('sun');
@@ -338,6 +344,49 @@ class App {
 
     // attempt to auto-load a local earth texture file if present (project root: earth_texture.jpg)
     try { this.tryLoadLocalEarthTexture(); } catch(e){ /* ignore */ }
+  }
+
+  // Simple event logger
+  logEvent(type, details = {}){
+    const entry = Object.assign({ time: new Date().toISOString(), type }, details);
+    this.eventLog.push(entry);
+    // keep log reasonably bounded
+    if(this.eventLog.length > 10000) this.eventLog.shift();
+  }
+
+  exportLogCSV(){
+    if(!this.eventLog || this.eventLog.length===0) return alert('No events to export');
+    const keys = Array.from(this.eventLog.reduce((set, e)=>{ Object.keys(e).forEach(k=>set.add(k)); return set; }, new Set()));
+    const rows = [keys.join(',')];
+    this.eventLog.forEach(e=>{
+      rows.push(keys.map(k=>{
+        const v = e[k] === undefined ? '' : String(e[k]).replace(/"/g, '""');
+        return `"${v}"`;
+      }).join(','));
+    });
+    const blob = new Blob([rows.join('\n')], { type: 'text/csv' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `meteor-sim-log-${new Date().toISOString().replace(/[:.]/g,'-')}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  takeScreenshot(){
+    try{
+      const canvas = this.renderer && this.renderer.domElement;
+      if(!canvas) return alert('Renderer not initialized');
+      const data = canvas.toDataURL('image/png');
+      const a = document.createElement('a');
+      a.href = data;
+      a.download = `meteor-sim-${new Date().toISOString().replace(/[:.]/g,'-')}.png`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+    }catch(e){ console.error('Screenshot failed', e); alert('Screenshot failed: ' + (e && e.message)); }
   }
 
   tryLoadLocalEarthTexture(){
@@ -798,6 +847,81 @@ class App {
     
     // Create shockwave effect
     this.createShockwave(position, explosionRadius);
+
+    // Create surface flame + smoke waves based on energy
+    try{
+      this.createSurfaceFlameSmoke(position, explosionRadius, energy);
+    }catch(e){ console.warn('createSurfaceFlameSmoke failed', e); }
+  }
+
+  // creates flame (bright, short-lived) and smoke (larger, slower) rings along surface
+  createSurfaceFlameSmoke(position, explosionRadius, energy){
+    const normal = position.clone().normalize();
+    // basis vectors
+    let up = new THREE.Vector3(0,1,0); if(Math.abs(normal.dot(up))>0.999) up = new THREE.Vector3(1,0,0);
+    const u = new THREE.Vector3().crossVectors(up, normal).normalize();
+    const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+    const flame = { particles: [], age:0, life:1.2 };
+    const smoke = { particles: [], age:0, life:4.0 };
+
+    const particleCount = Math.min(80, Math.floor(10 + explosionRadius * 2 + Math.log10(Math.max(energy,1))));
+    const R = this.earthRadius;
+    for(let i=0;i<particleCount;i++){
+      const phi = Math.random()*Math.PI*2;
+      const ang = 0.02 + Math.random()*0.08;
+      const dir = normal.clone().multiplyScalar(Math.cos(ang)).add(u.clone().multiplyScalar(Math.cos(phi)*Math.sin(ang))).add(v.clone().multiplyScalar(Math.sin(phi)*Math.sin(ang))).normalize();
+      const pos = dir.clone().multiplyScalar(R + 0.02 + Math.random()*0.02);
+
+      // flame particle (bright, short)
+      const fg = new THREE.SphereGeometry(0.03 + Math.random()*0.08, 6,6);
+      const fm = new THREE.MeshBasicMaterial({ color: 0xff6600, transparent:true, opacity:0.95, blending:THREE.AdditiveBlending });
+      fm.depthTest = false;
+      const fmesh = new THREE.Mesh(fg, fm);
+      fmesh.position.copy(pos);
+      this.scene.add(fmesh);
+      flame.particles.push({ mesh:fmesh, dir, speed: 0.4 + Math.random()*0.6 });
+
+      // smoke particle (darker, larger, rises slowly)
+      const sg = new THREE.SphereGeometry(0.06 + Math.random()*0.25, 6,6);
+      const sm = new THREE.MeshBasicMaterial({ color: 0x332822, transparent:true, opacity:0.6 });
+      const smesh = new THREE.Mesh(sg, sm);
+      smesh.position.copy(pos);
+      this.scene.add(smesh);
+      smoke.particles.push({ mesh:smesh, dir, speed: 0.15 + Math.random()*0.2, rise: 0.02 + Math.random()*0.05 });
+    }
+
+    this.surfaceWaves.push({ flame, smoke, pos: position.clone(), radius: explosionRadius, created: Date.now() });
+  }
+
+  updateSurfaceWaves(){
+    const dt = 0.02 * this.simSpeed;
+    for(let i=this.surfaceWaves.length-1;i>=0;i--){
+      const w = this.surfaceWaves[i];
+      w.flame.age += dt; w.smoke.age += dt;
+      // update flames
+      for(let j=w.flame.particles.length-1;j>=0;j--){
+        const p = w.flame.particles[j];
+        // move outward along tangent
+        p.mesh.position.add(p.dir.clone().multiplyScalar(p.speed * dt));
+        p.mesh.material.opacity = Math.max(0, 0.95 * (1 - (w.flame.age / w.flame.life)));
+        p.mesh.scale.multiplyScalar(1 - 0.2*dt);
+        if(w.flame.age > w.flame.life){ this.scene.remove(p.mesh); w.flame.particles.splice(j,1); }
+      }
+      // update smoke
+      for(let j=w.smoke.particles.length-1;j>=0;j--){
+        const p = w.smoke.particles[j];
+        p.mesh.position.add(p.dir.clone().multiplyScalar(p.speed * dt));
+        // smoke rises a bit
+        p.mesh.position.add(p.dir.clone().multiplyScalar(0));
+        p.mesh.position.y += p.rise * dt * (1 + Math.random()*0.2);
+        p.mesh.material.opacity = Math.max(0, 0.6 * (1 - (w.smoke.age / w.smoke.life)));
+        p.mesh.scale.multiplyScalar(1 + 0.02*dt);
+        if(w.smoke.age > w.smoke.life){ this.scene.remove(p.mesh); w.smoke.particles.splice(j,1); }
+      }
+
+      if(w.flame.particles.length===0 && w.smoke.particles.length===0){ this.surfaceWaves.splice(i,1); }
+    }
   }
 
   // Create shockwave effect
@@ -820,6 +944,97 @@ class App {
       lifetime: 1.0,
       maxRadius: radius * 2
     });
+    // Create a surface-constrained shockwave that expands along the Earth's surface
+    try{
+      this.createSurfaceShockwave(position, radius);
+    }catch(e){ console.warn('Surface shockwave creation failed', e); }
+  }
+
+  // Create a shockwave that propagates along the sphere surface (Earth)
+  createSurfaceShockwave(position, explosionRadius){
+    if(!position) return;
+    const normal = position.clone().normalize(); // unit vector from center to impact
+    // build orthonormal basis (u,v) on tangent plane
+    let up = new THREE.Vector3(0,1,0);
+    if(Math.abs(normal.dot(up)) > 0.999) up = new THREE.Vector3(1,0,0);
+    const u = new THREE.Vector3().crossVectors(up, normal).normalize();
+    const v = new THREE.Vector3().crossVectors(normal, u).normalize();
+
+    const segments = 128;
+    const geometry = new THREE.BufferGeometry();
+    const positions = new Float32Array(segments * 3);
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+
+  const mat = new THREE.LineBasicMaterial({ color: 0xffcc44, transparent: true, opacity: 0.95, blending: THREE.AdditiveBlending });
+  // draw on top of terrain to avoid z-fighting
+  mat.depthTest = false;
+    const line = new THREE.LineLoop(geometry, mat);
+    line.frustumCulled = false;
+    this.scene.add(line);
+
+    // Determine animation parameters
+  // Scale maxAngle and speed by explosion radius so big impacts create wide rings
+  const baseMax = Math.max(1.0, explosionRadius * 0.08);
+  const maxAngle = Math.min(Math.PI, baseMax); // radians
+  const angularSpeed = 1.2 + Math.min(8, explosionRadius * 0.12); // rad/s-ish
+
+    const shock = {
+      mesh: line,
+      normal,
+      u,
+      v,
+      angle: 0.02,
+      maxAngle,
+      speed: angularSpeed,
+      segments,
+      lifetime: Math.max(2.0, maxAngle / angularSpeed + 0.5)
+    };
+
+    // initialize positions for angle 0 (tiny circle)
+    this.surfaceShockwaves.push(shock);
+    this.updateSingleSurfaceShockwave(shock);
+  }
+
+  // recompute a single surface shockwave's vertex positions based on shock.angle
+  updateSingleSurfaceShockwave(shock){
+    const { segments, normal, u, v, angle } = shock;
+    const posAttr = shock.mesh.geometry.attributes.position;
+    const positions = posAttr.array;
+    const R = this.earthRadius; // scene units
+    for(let i=0;i<segments;i++){
+      const phi = (i/segments) * Math.PI * 2;
+      // point on sphere at angular distance `angle` from `normal` in direction phi
+      // p = cos(angle)*normal + sin(angle)*(cos(phi)*u + sin(phi)*v)
+      const cosA = Math.cos(angle);
+      const sinA = Math.sin(angle);
+      const dir = new THREE.Vector3();
+      dir.copy(normal).multiplyScalar(cosA).add(
+        u.clone().multiplyScalar(Math.cos(phi)*sinA).add(v.clone().multiplyScalar(Math.sin(phi)*sinA))
+      ).normalize();
+      const p = dir.multiplyScalar(R + 0.01); // slightly above surface
+      positions[i*3+0] = p.x;
+      positions[i*3+1] = p.y;
+      positions[i*3+2] = p.z;
+    }
+    posAttr.needsUpdate = true;
+    shock.mesh.geometry.computeBoundingSphere();
+  }
+
+  updateSurfaceShockwaves(){
+    for(let i=this.surfaceShockwaves.length-1;i>=0;i--){
+      const s = this.surfaceShockwaves[i];
+      const dt = 0.02 * this.simSpeed;
+        s.angle += s.speed * dt;
+        s.lifetime -= dt;
+        // fade opacity based on progress (0 -> start visible, 1 -> gone)
+        const progress = Math.min(1, s.angle / s.maxAngle);
+        s.mesh.material.opacity = Math.max(0, 0.95 * (1 - progress));
+      this.updateSingleSurfaceShockwave(s);
+      if(s.angle >= s.maxAngle || s.lifetime <= 0){
+        this.scene.remove(s.mesh);
+        this.surfaceShockwaves.splice(i,1);
+      }
+    }
   }
 
   // Update explosion effects
@@ -948,6 +1163,7 @@ class App {
     
     this.meteors.push(asteroidData);
     this.lastMeteorData = asteroidData;
+  this.logEvent('spawn', { source: 'fireSelectedAsteroid', name: details.name, size: midSize, mass, entrySpeed: asteroidData.entrySpeed });
     this.updateMeteorStats();
     
     // Create trajectory line
@@ -1063,6 +1279,7 @@ class App {
     
     this.meteors.push(meteorData);
     this.lastMeteorData = meteorData;
+  this.logEvent('spawn', { source: 'shootMeteor', size, mass, entrySpeed: meteorData.entrySpeed });
     this.updateMeteorStats();
     
     // Create trajectory line
@@ -1192,6 +1409,11 @@ class App {
     // update explosion effects
     this.updateExplosionEffects();
 
+  // update surface shockwaves (propagate along Earth surface)
+  this.updateSurfaceShockwaves();
+  // update surface flame + smoke waves
+  this.updateSurfaceWaves();
+
     // update trajectory lines
     this.updateTrajectoryLines();
 
@@ -1305,6 +1527,10 @@ class App {
       
       if(r < this.earthRadius + 0.2){
         meteor.active = false;
+        // compute impact energy before removing
+        let speedAtImpact = meteor.physVelocity ? meteor.physVelocity.length() : (meteor.velocity ? meteor.velocity.length()*this.SCENE_SCALE : 0);
+        const ke = 0.5 * (meteor.mass || 1) * speedAtImpact * speedAtImpact;
+        this.logEvent('impact', { source: 'animate', energy: ke, position: pos.clone().toArray(), size: meteor.size || null });
         this.createImpact(pos.clone());
         
         // Create explosion effect
@@ -1389,6 +1615,8 @@ class App {
   }
 
   createImpact(position){
+    // Log the impact position
+    this.logEvent('impact_marker', { position: position.toArray() });
     const normal = position.clone().normalize();
     const geo = new THREE.RingGeometry(0.1,0.2,32);
     const mat = new THREE.MeshBasicMaterial({ color:0xff0000, side:THREE.DoubleSide, transparent:true, opacity:0.8 });
@@ -1522,6 +1750,7 @@ class App {
     
     this.meteors.push(asteroidData);
     this.lastMeteorData = asteroidData;
+  this.logEvent('spawn', { source: 'spawnSelectedAsteroid', name: details.name, size: midSize, mass, entrySpeed: asteroidData.entrySpeed });
     this.updateMeteorStats();
     
     // Create trajectory line
